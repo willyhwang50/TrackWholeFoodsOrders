@@ -41,20 +41,18 @@ const query = "{from:order-update@amazon.com} 'your delivery is complete' 'Grand
 
 // Monthmap connects abbreviated name of month to corresponding int
 var Monthmap = map[string]string{
-	"Jan":      "01",
-	"January":  "01",
-	"Feb":      "02",
-	"February": "02",
-	"Mar":      "03",
-	"Apr":      "04",
-	"May":      "05",
-	"Jun":      "06",
-	"Jul":      "07",
-	"Aug":      "08",
-	"Sep":      "09",
-	"Oct":      "10",
-	"Nov":      "11",
-	"Dec":      "12",
+	"Jan": "01",
+	"Feb": "02",
+	"Mar": "03",
+	"Apr": "04",
+	"May": "05",
+	"Jun": "06",
+	"Jul": "07",
+	"Aug": "08",
+	"Sep": "09",
+	"Oct": "10",
+	"Nov": "11",
+	"Dec": "12",
 }
 
 // Retrieve a token, saves the token, then returns the generated client.
@@ -122,6 +120,15 @@ type Order struct {
 //GetSummary of the properties.
 func (order Order) GetSummary() {
 	fmt.Println(order.OrdNum, order.OrdDate, order.GrandTotal)
+}
+
+// GetOrdDate changes OrdDate in Stringform to time.Time
+func (order Order) GetOrdDate() time.Time {
+	date, err := time.Parse(shortform, order.OrdDate)
+	if err != nil {
+		log.Fatal("cannot convert OrdDate to time.Time", err)
+	}
+	return date
 }
 
 // ConvtoTime casts dates written in strings to type time.Time.
@@ -192,7 +199,7 @@ func GetOrderFeats(user string, srv *gmail.Service, r *gmail.ListMessagesRespons
 	return Orders
 }
 
-// InsertOrder to Database.
+// InsertOrder to db.
 func InsertOrder(Orders []Order, db *sql.DB) {
 	for i, ord := range Orders {
 		id := ord.OrdNum
@@ -257,7 +264,8 @@ func UpdateDB(srv *gmail.Service, lastupdate string, db *sql.DB) {
 }
 
 //RetrieveOrders from mySQL Database.
-func RetrieveOrders(db *sql.DB, cond *Conditions) {
+func RetrieveOrders(db *sql.DB, cond *Conditions) *[]Order {
+	var OrdData []Order
 	sql := (*cond).GetQuery()
 	fmt.Println(sql)
 	rows, err := db.Query(sql)
@@ -267,14 +275,17 @@ func RetrieveOrders(db *sql.DB, cond *Conditions) {
 	defer rows.Close()
 
 	for rows.Next() {
-		var ordData Order
+		var ord Order
 		var id string
-		err = rows.Scan(&id, &ordData.OrdNum, &ordData.OrdDate, &ordData.GrandTotal)
+		err = rows.Scan(&id, &ord.OrdNum, &ord.OrdDate, &ord.GrandTotal)
 		if err != nil {
 			log.Fatal("cannot retrieve data", err)
 		}
-		ordData.GetSummary()
+		fmt.Print(id)
+		ord.GetSummary()
+		OrdData = append(OrdData, ord)
 	}
+	return &OrdData
 }
 
 // Conditions is a struct which contains information for writing a select query
@@ -284,6 +295,15 @@ type Conditions struct {
 	lb      string
 	ub      string
 	numrows string
+}
+
+// GetNumRows Retrieves the property numrows as float64
+func (c Conditions) GetNumRows() int {
+	nr, err := strconv.Atoi(c.numrows)
+	if err != nil {
+		log.Fatal("cannot retrieve numrows as int", err)
+	}
+	return nr
 }
 
 // GetConditions retrieves summary of the conditions as a string
@@ -297,6 +317,13 @@ func (c Conditions) GetConditions() string {
 //GetQuery function creates a Query for retrieving data from mySQL
 func (c Conditions) GetQuery() string {
 	Query := "SELECT * from Wholefoods where '" + c.start + "' < order_date and order_date < '" + c.end + "' and " + c.lb + " < grand_total and grand_total < " + c.ub + " limit " + c.numrows
+	return Query
+}
+
+//GetSumQuery writes a Query that retrieves a summary statistics
+func (c Conditions) GetSumQuery() string {
+	subquery := c.GetQuery()
+	Query := "SELECT DATEDIFF(max(t1.order_date), min(t1.order_date)) as gap, avg(t1.grand_total) as spending from (" + subquery + ") t1;"
 	return Query
 }
 
@@ -360,8 +387,10 @@ CondPanel:
 			var ub string
 			fmt.Println("1. Greater Than")
 			fmt.Scanln(&lb)
+			cond.lb = lb
 			fmt.Println("2. Less Than")
 			fmt.Scanln(&ub)
+			cond.ub = ub
 			Condmap[2] = true
 		case 3:
 			if Condmap[3] {
@@ -375,13 +404,14 @@ CondPanel:
 			var numrows string
 			fmt.Println("How Many Rows do you want?")
 			fmt.Scanln(&numrows)
+			cond.numrows = numrows
 			Condmap[3] = true
 		case 4:
 			fmt.Println("Retrieving All data")
-			RetrieveOrders(db, &condInit)
+			_ = RetrieveOrders(db, &condInit)
 		case 5:
 			fmt.Println("Retrieving Data with conditions: ", cond.GetConditions())
-			RetrieveOrders(db, &cond)
+			_ = RetrieveOrders(db, &cond)
 			break CondPanel
 		case 6:
 			break CondPanel
@@ -391,6 +421,64 @@ CondPanel:
 		}
 	}
 	return
+}
+
+// ShowPattern summarizes purchase patterns
+func ShowPattern(db *sql.DB, cond *Conditions) {
+	SumQuery := cond.GetSumQuery()
+	rows, err := db.Query(SumQuery)
+	if err != nil {
+		log.Fatal("cannot get summary data", err)
+	}
+	var gap int
+	var spending float64
+	for rows.Next() {
+		rows.Scan(&gap, &spending)
+		fmt.Println(gap)
+		fmt.Println(spending)
+	}
+	AvgGap := gap / cond.GetNumRows()
+	AvgSpend := spending
+	fmt.Printf("You are purchasing every %d days \n", AvgGap)
+	fmt.Printf("You are spending about %f $s per order \n", AvgSpend)
+}
+
+// CreateStats based on the Database.
+func CreateStats(db *sql.DB) {
+	CondStats := Conditions{
+		start:   "2021-01-01",
+		end:     "2021-05-01",
+		lb:      "0.0",
+		ub:      "100000",
+		numrows: "7",
+	}
+	fmt.Println("What do you want to do?")
+	fmt.Println("1. Summarize Purchase Pattern")
+	fmt.Println("2. Predict next order date. (amount fixed)")
+	fmt.Println("3. Predict how much I should order (date fixed)")
+	fmt.Println("4. Return to main menu")
+	var stats int
+	fmt.Scanln(&stats)
+StatsQuery:
+	for {
+		switch stats {
+		case 1:
+			ShowPattern(db, &CondStats)
+			break StatsQuery
+		case 2:
+			//PredictDate(db)
+			break StatsQuery
+		case 3:
+			//PredictAmt(db)
+			break StatsQuery
+		case 4:
+			break StatsQuery
+		default:
+			fmt.Println("Not a Valid input. Try again.")
+			fmt.Scanln(&stats)
+		}
+	}
+
 }
 
 func main() {
@@ -460,10 +548,11 @@ UpdateQ:
 		switch update {
 		case "yes":
 			UpdateDB(srv, LastUpdate, db)
-			fmt.Println("Update is complete")
+			os.Setenv("LastUpdate", LastUpdate)
+			fmt.Println("Update is complete. Latest Update is now", LastUpdate)
 			break UpdateQ
 		case "no":
-			fmt.Println("Not Updating Database")
+			fmt.Println("Not Updating Database. Latest Update is", LastUpdate)
 			break UpdateQ
 		default:
 			fmt.Println("Not a proper command. Type 'yes' or 'no'")
@@ -490,8 +579,10 @@ ActionPanel:
 			CreateView(srv, db)
 		case 2:
 			fmt.Println("Directing to Edit...")
+			//CreateEdit(srv, db)
 		case 3:
 			fmt.Println("Directing to Stats...")
+			CreateStats(db)
 		case 4:
 			fmt.Println("Bye bye")
 			break ActionPanel
